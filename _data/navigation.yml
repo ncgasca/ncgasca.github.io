@@ -7,7 +7,7 @@ main:
     url: /consulting/    
         
   - title: "Blog Posts"
-    url: /year-archive/
+    url: /posts/
     
   - title: "Portfolio" # Better title for conference posters, graphics, data visualization
     url: /portfolio/
