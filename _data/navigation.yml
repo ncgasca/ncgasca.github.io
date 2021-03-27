@@ -3,20 +3,23 @@ main:
   - title: "Publications"
     url: /publications/
 
-  - title: "Talks"
-    url: /talks/    
-
-  - title: "Teaching"
-    url: /teaching/    
-    
-  - title: "Portfolio"
-    url: /portfolio/
+  - title: "Consulting"
+    url: /consulting/    
         
   - title: "Blog Posts"
     url: /year-archive/
     
+  - title: "Portfolio" % Better title for conference posters, graphics, data visualization
+    url: /portfolio/
+    
+  - title: "Talks"  % Oral and Poster?
+    url: /talks/    
+
+  - title: "Service"
+    url: /service/ 
+    
   - title: "CV"
     url: /cv/
     
-  - title: "Guide"
+  - title: "Guide" % Delete before finishing. Has all the shortcut descriptions
     url: /markdown/
