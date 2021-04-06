@@ -1,25 +1,17 @@
 # main links links
 main:
-  - title: "Publications"
-    url: /publications/
 
+  - title: "Background"  # Oral and Poster?
+    url: /background/  
+    
   - title: "Consulting"
     url: /consulting/    
-        
-  - title: "Blog Posts"
-    url: /posts/
-    
-  - title: "Portfolio" # Better title for conference posters, graphics, data visualization
-    url: /portfolio/
-    
-  - title: "Talks"  # Oral and Poster?
-    url: /talks/    
 
   - title: "Service"
     url: /service/ 
     
-  - title: "CV"
-    url: /cv/
+  - title: "Portfolio" # Better title for posters, conference posters, graphics, data visualization
+    url: /portfolio/
     
   - title: "Guide" # Delete before finishing. Has all the shortcut descriptions
     url: /markdown/
