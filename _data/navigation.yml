@@ -1,17 +1,17 @@
 # main links links
 main:
 
-  - title: "Background"  # Oral and Poster?
-    url: /background/  
+ % - title: "Background"  # Oral and Poster?
+ %   url: /background/  
     
-  - title: "Consulting"
-    url: /consulting/    
+ % - title: "Consulting"
+  %  url: /consulting/    
 
-  - title: "Service"
-    url: /service/ 
+  %- title: "Service"
+  %  url: /service/ 
     
-  - title: "Portfolio" # Better title for posters, conference posters, graphics, data visualization
-    url: /portfolio/
+ % - title: "Portfolio" # Better title for posters, conference posters, graphics, data visualization
+ %   url: /portfolio/
     
-  - title: "Guide" # Delete before finishing. Has all the shortcut descriptions
-    url: /markdown/
+ % - title: "Guide" # Delete before finishing. Has all the shortcut descriptions
+ %   url: /markdown/
