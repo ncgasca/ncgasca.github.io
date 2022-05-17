@@ -12,7 +12,7 @@ redirect_from:
 Education
 ======
 * B.S. in Mathematics, California State Polytechnic University Pomona, 2014
-* Ph.D. in Biostatistics, University of Washington, 2021 (expected)
+* Ph.D. in Biostatistics, University of Washington, 2021
 
 #Work experience
 #======
