@@ -8,4 +8,6 @@ redirect_from:
 
 This page includes code that Natalie has developed for some of her published works.
 
-R code for the data analysis portion of "**Comparison of dimension reduction methods for the identification of heart-healthy dietary patterns**" can be found [here in txt format](https://github.com/ncgasca/ncgasca.github.io/files/9553809/Gasca_Rcode_DataApplication_Basic.txt) (last updated Sept. 12, 2022).
+Code for the data analysis portion of "**Comparison of dimension reduction methods for the identification of heart-healthy dietary patterns**" can be found below:
++ [Full version in txt format](https://github.com/ncgasca/ncgasca.github.io/files/9553809/Gasca_Rcode_DataApplication_Basic.txt) with accompanying [C++ code in txt format](https://github.com/ncgasca/ncgasca.github.io/files/9553809/Gasca_Rcode_DataApplication_Basic.txt) (updated Feb. 12, 2023) for the complete code including least squares adjustment for covariates, optimized for speed
++ [Simplified version in txt format](https://github.com/ncgasca/ncgasca.github.io/files/9553809/Gasca_Rcode_DataApplication_Basic.txt) to compare our SPLS code ( updated Sept. 12, 2022) with the R package spls.
