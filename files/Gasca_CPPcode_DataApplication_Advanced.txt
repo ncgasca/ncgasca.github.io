@@ -1,0 +1,333 @@
+#########################################################################################
+#############  C++ Code "PLScovs.cpp" for Data Analysis (Section 4) from  ###############
+#############  "Comparison of Dimension Reduction Methods for the  ######################
+#############  Identification of Heart-Healthy Dietary Patterns"  #######################
+#############  Author: Natalie Gasca  ## Updated: Feb 12, 2023 ##########################
+#########################################################################################
+
+
+using namespace Rcpp;
+
+// [[Rcpp::export]]
+NumericMatrix matmult(NumericMatrix mat1, NumericMatrix mat2) {
+  int n1=mat1.rows();
+  int n2=mat2.rows();
+  int p1=mat1.cols();
+  int p2=mat2.cols();
+  int i;
+  int j;
+  int k;
+  NumericMatrix mult(n1,p2);
+
+  if(p1!=n2){
+    std::cout << "Error! Wrong dimension of matrices";
+    return(0);
+  }
+
+  for(i=0; i<n1; ++i){
+    for(j=0; j<p2; ++j){
+      for(k=0; k<p1; ++k){  
+         mult(i,j) += mat1(i,k) * mat2(k,j);
+      }
+    }
+  }
+
+  return(mult);
+}
+
+// [[Rcpp::export]]
+NumericVector mat_x_vec(NumericMatrix mat, NumericVector vec) {
+  int n=mat.rows();
+  int p=mat.cols();
+  int j;
+  int i;
+  double vec_j;
+  NumericVector mult(n);
+
+  if(p!=vec.size()){
+    std::cout << "Error! Wrong dimension of matrix/vector";
+    return(0);
+  }
+
+   for(j=0; j<p; ++j){
+     vec_j=vec[j];
+     for(i=0; i<n; ++i){  
+         mult[i] += mat(i,j) * vec_j;
+      }
+    }
+
+  return(mult);
+}
+
+
+// [[Rcpp::export]]
+NumericMatrix tvec_x_vec(NumericVector tvec, NumericVector vec) {
+  int n=tvec.size();
+  int p=vec.size();
+  int i;
+  int j;
+  double tvec_i;
+  NumericMatrix mult(n,p);
+
+   for(i=0; i<n; ++i){
+     tvec_i=tvec[i];
+     for(j=0; j<p; ++j){  
+         mult(i,j) = vec[j] * tvec_i;
+      }
+    }
+
+  return(mult);
+}
+
+
+// [[Rcpp::export]]
+NumericVector vec_x_mat(NumericVector vec, NumericMatrix mat) {
+  int n=mat.rows();
+  int p=mat.cols();
+  int i;
+  int j;
+  NumericVector mult(p);
+
+  if(n!=vec.size()){
+    std::cout << "Error! Wrong dimension of matrix/vector";
+    return(0);
+  }
+
+   for(j=0; j<p; ++j){
+     for(i=0; i<n; ++i){  
+         mult[j] += mat(i,j) * vec[i];
+      }
+    }
+
+  return(mult);
+}
+
+
+
+
+// [[Rcpp::export]]
+double vec_x_vec(NumericVector vec1, NumericVector vec2) {
+  int p1=vec1.size();
+  int p2=vec2.size();
+  int i;
+  double mult=0.0;
+
+  if(p1!=p2){
+    std::cout << "Error! Wrong dimension of vectors";
+    return(0);
+  }
+
+  for(i=0; i<p1; ++i){  
+         mult += vec1[i] * vec2[i];
+   }
+
+  return(mult);
+}
+
+
+// [[Rcpp::export]]
+NumericMatrix subtr_mat(NumericMatrix mat1, NumericMatrix mat2) {
+  int n1=mat1.rows();
+  int p1=mat1.cols();
+  int n2=mat2.rows();
+  int p2=mat2.cols();
+  int i;
+  int j;
+  NumericMatrix mult(n1,p1);
+
+  if(n1!=n2){
+    std::cout << "Error! Wrong dimension of matrices (nrows)";
+    return(0);
+  }
+ 
+ if(p1!=p2){
+    std::cout << "Error! Wrong dimension of matrices (ncols)";
+    return(0);
+  }
+
+   for(j=0; j<p1; ++j){
+     for(i=0; i<n1; ++i){  
+         mult(i,j) = mat1(i,j) - mat2(i,j);
+      }
+    }
+
+  return(mult);
+}
+
+
+// [[Rcpp::export]]
+NumericVector subtr_vec(NumericVector vec1, NumericVector vec2) {
+  int n1=vec1.size();
+  int n2=vec2.size();
+  int i;
+  NumericVector mult(n1);
+
+  if(n1!=n2){
+    std::cout << "Error! Wrong dimension of vectors";
+    return(0);
+  }
+
+   for(i=0; i<n1; ++i){  
+         mult[i] = vec1[i] - vec2[i];
+      }
+  
+  return(mult);
+}
+
+
+// [[Rcpp::export]]
+List plsC(NumericMatrix Xi, NumericVector yi, int K) {
+  int n=Xi.rows();
+  int j=Xi.cols();
+
+  int i;
+  NumericMatrix tXi(j,n);
+  NumericVector w(j);
+  double w_norm;
+  NumericVector t(n);
+  double TT;
+  NumericVector p(j);
+  double q;
+  NumericMatrix TP(n,j);
+  NumericVector TQ(n);
+  NumericMatrix Ws(j,K);
+  NumericMatrix Ts(n,K);
+  NumericMatrix Ps(j,K);
+  NumericVector qs(K);
+
+  NumericMatrix Xiter(n,j);
+  NumericVector yiter(n); 
+ 
+
+  if(n!=yi.size()){
+    std::cout << "Error! Wrong dimension of yi";
+    return(0);
+  }
+
+  if(K>j){
+    std::cout << "Error! Too many components in K";
+    return(0);
+  }
+
+  if(K<1){
+    std::cout << "Error! Too few components K";
+    return(0);
+  }
+
+
+  for(i=0; i<K; ++i){
+    if(i==0){
+    Xiter = Xi;
+    yiter = yi;
+    }
+
+        tXi = transpose(Xiter);
+     w = mat_x_vec(tXi, yiter);
+        w_norm = sqrt(vec_x_vec(w, w));
+     w = w/w_norm;
+
+     t = mat_x_vec(Xiter, w);
+        TT = vec_x_vec(t, t);
+
+     p = mat_x_vec(tXi, t) / TT;
+     q = vec_x_vec(yiter, t) / TT;
+        TP = tvec_x_vec(t, p);
+     Xiter = subtr_mat(Xiter, TP);
+        TQ = t * q;
+     yiter = subtr_vec(yiter, TQ);
+
+     Ws(_,i) = w;
+     Ts(_,i) = t;
+     Ps(_,i) = p;
+     qs[i] = q;
+   }
+
+  qs.attr("dim") = Dimension(1,K);
+  NumericMatrix Qs = as<NumericMatrix>(qs);
+
+  return(List::create(  _["Ts"]=Ts, _["Ws"]=Ws, _["Ps"]=Ps, _["Qs"]=Qs));
+}
+
+
+// [[Rcpp::export]]
+List wplsC(NumericMatrix Xi, NumericVector zi, NumericMatrix Vi, int K) {
+  int n=Xi.rows();
+  int j=Xi.cols();
+
+  int i;
+  NumericMatrix tXi(j,n);
+  NumericVector VZ(n);
+  NumericVector w(j);
+  double w_norm;
+  NumericVector t(n);
+  NumericVector Vt(n);
+  double TVT;
+  NumericVector p(j);
+  double q;
+  NumericMatrix TP(n,j);
+  NumericVector TQ(n);
+  NumericMatrix Ws(j,K);
+  NumericMatrix Ts(n,K);
+  NumericMatrix Ps(j,K);
+  NumericVector qs(K);
+
+  NumericMatrix Xiter(n,j);
+  NumericVector ziter(n);
+ 
+
+  if(n!=zi.size()){
+    std::cout << "Error! Wrong dimension of zi";
+    return(0);
+  }
+  
+  if(n!=Vi.rows()){
+    std::cout << "Error! Wrong dimension of V";
+    return(0);
+  }
+
+  if(K>j){
+    std::cout << "Error! Too many components in K";
+    return(0);
+  }
+
+  if(K<1){
+    std::cout << "Error! Too few components K";
+    return(0);
+  }
+
+
+  for(i=0; i<K; ++i){
+    if(i==0){
+    Xiter = Xi;
+    ziter = zi;
+    }
+
+        tXi = transpose(Xiter);
+        VZ = mat_x_vec(Vi, ziter);
+     w = mat_x_vec(tXi, VZ);
+        w_norm = sqrt(vec_x_vec(w, w));
+     w = w/w_norm;
+
+     t = mat_x_vec(Xiter, w);
+        Vt = mat_x_vec(Vi, t);
+        TVT = vec_x_vec(t, Vt);
+
+     p = mat_x_vec(tXi, Vt) / TVT;
+     q = vec_x_vec(ziter, Vt) / TVT;
+        TP = tvec_x_vec(t, p);
+     Xiter = subtr_mat(Xiter, TP);
+        TQ = t * q;
+     ziter = subtr_vec(ziter, TQ);
+
+     Ws(_,i) = w;
+     Ts(_,i) = t;
+     Ps(_,i) = p;
+     qs[i] = q;
+   }
+
+  qs.attr("dim") = Dimension(1,K);
+  NumericMatrix Qs = as<NumericMatrix>(qs);
+
+  return(List::create(  _["Ts"]=Ts, _["Ws"]=Ws, _["Ps"]=Ps, _["Qs"]=Qs));
+}
+

@@ -1,0 +1,1164 @@
+############################################################################################
+################  R Code to Replicate Data Analysis (Section 4) from  #################
+################  "Comparison of Dimension Reduction Methods for the  ##############
+################  Identification of Heart-Healthy Dietary Patterns"  ##################
+################  Author: Natalie Gasca  ## Updated: Feb 12, 2023 ####################
+############################################################################################
+
+###### NOTE: The following code was run on a computer cluster. ######
+
+#!/usr/local/bin/Rscript
+
+#### %%%%%%%%%%%%%%% A. Import and Clean Data to create X/L/Y datasets  %%%%%%%%%%%%%%% ####
+
+#### Correctly order X matrix (Food Frequency Questionnaire values) ####
+load("MESA_Diet.Rda") # 1=idno, 2:121=foods
+load("MESA_fcGrp.Rda") # Has the title of the food, food group, and food group number
+
+diet <- Diet[,-1]
+orFFQ <- fcGrp[order(fcGrp[,3]),1:3]
+X <- as.matrix(diet[,orFFQ[,1]]); rm(diet)
+
+#### Correctly identify y (BMI) and adjustment variables L ####
+load("MESA_BMI_preds.Rda")
+
+Ldata <- BMI_preds[BMI_preds$idno %in% Diet$idno,] # idno, bmi, and adjustments: ("age","male","energy","Asian","Black","Hispanic","logie")   
+
+BMIy <- Ldata[,2]
+
+L <- Ldata[,3:9]
+bin.L.id <- c(2,4:6) # Indicator for adjustment variables in L that are binary
+
+
+
+#### %%%%%%%%%%%%%%% B. Libraries, Variables, and Tuning Parameters for ALL METHODS  %%%%%%%%%%%%%%% ####
+
+#### Load libraries and variables ####
+library("pls") ; library("spls") ; library("Rcpp"); library("glmnet");  library("elasticnet") 
+sourceCpp("PLScovs.cpp")
+
+scale.x <- T; scale.l <- T; p <- ncol(X); q <- ncol(L); n <- length(BMIy)
+do.1se <- T;
+
+
+#### Initial Tuning Parameter Values [for Most Methods] #####
+nfold <- 10
+
+set.seed(316, kind="L'Ecuyer-CMRG"); segments <- cvsegments(n, k=nfold)  
+
+segmentvector <- rep(NA,n) # Format for Lasso
+for(k in 1:nfold){ segmentvector[segments[[k]]] <- rep(k, length(segments[[k]]))  }
+rm(k)
+
+sparstest <- c(seq(0,.5,by=.1),seq(.55,.95,by=.05)); cat("\nSPLS sparstest is",sparstest,"\n") #c(0, seq(.1,.95,by=.05))
+
+library(Matrix); M <- min(p, rankMatrix(X,method='qr')[1]); cat("\n Data Matrix Rank is",M,"\n")
+
+comptest <- 1:M
+
+
+
+#### %%%%%%%%%%%%%%% C. Functions for (SPARSE) COMPONENT-BASED METHODS  %%%%%%%%%%%%%%% ####
+
+# Center and scale data accd to pls function [scale then center]  #SAME AS scale(origX , center=,scale=)
+PLSscaleX <- function(origX,scale.x=T, testX=NA){
+  big1 <- rep(1,nrow(origX))
+  if(scale.x==T){  X.sd <- apply(origX,2,sd);   Xi <- origX /(big1 %*% t(X.sd))
+  } else{ Xi <- origX }
+  
+  Xi.m <- colMeans(Xi); Xi <- Xi - big1 %*% t(Xi.m) # Centering after scaling X
+  
+  if(anyNA(testX)==F){
+    big1 <- rep(1, nrow(testX))
+    if(scale.x==T){ testXi <- testX / (big1 %*% t(X.sd)) 
+    } else{ testXi <- testX }
+    
+    testXi <- testXi - big1 %*% t(Xi.m)
+    return(list('Xi'=Xi,'testXi'=testXi))
+  } else{ return(Xi) }
+}
+
+# Weighted metric "improve" to select best tuning parameter pair 
+select.best.pair <- function(ref1,ref2,par1,par2,par1val=2,par2val=-1){ #Want to decrease par1 and increase par2
+  pair.scores <- par1val*as.vector(ref1-par1) + par2val*as.vector(ref2-par2)
+  print(rbind(c(ref1,ref2,0),cbind(par1,par2,pair.scores)))
+  best.pos <- which.max(pair.scores)
+  return(c(par1[best.pos],par2[best.pos]))
+}
+
+# For plotting a nice range of Cross-Validated RMSE
+round.d <- function(val,base=5){ base*round((val-base/2.01)/base)}
+round.u <- function(val,base=5){ base*round((val+base/2.01)/base)}
+
+# Plot Cross-Validated RMSE
+cv.plot <- function(cvmat,Kgrid,sparsgrid,KIndMin,SparsIndMin,
+                             KInd1se=NULL,SparsInd1se=NULL,objmin=T,
+                             title="RMSE",ytitle="%"){ #Source: https://rdrr.io/cran/spls/src/R/heatmap.spls.R
+  cvRan <- range(cvmat,na.rm=T) 
+  plunit <- signif(cvRan[2]-cvRan[1],1)/5
+  plotRan <- c(round.d(cvRan[1],plunit),round.u(cvRan[2],plunit)); coln=10
+  maxcomps <- length(na.omit(cvmat[1,]))
+  plotcol <- c(topo.colors(coln+2)[c(1,3,4)],"green3",topo.colors(coln+2)[c(5,8)],"darkgoldenrod1",topo.colors(coln+2)[12],"lightsalmon","coral1")
+  if(objmin==T){ plotcol <- rev(plotcol)} # Are we minimizing or maximizing the cvmat
+  
+  par(mar=c(3.5, 3.5, 2.1, 0.1),mgp=c(2.2,1,0), fig=c(0,.85,0,1) )
+  image( t(cvmat[,1:maxcomps]),zlim=plotRan, col=plotcol,
+         main=paste(title,"plot for CV SPLS "), xlab="No. of Comps", 
+         ylab=paste("Sparsity",ytitle),axes=FALSE )
+  
+  xcoord <- seq(0,1,length=maxcomps); ycoord <- seq(0,1,length=nrow(cvmat))
+  xunit <- xcoord[2]; yunit <- ycoord[2]
+  abline(v=xcoord+xunit/2,col="grey70",lty=2)
+  abline(h=ycoord+yunit/2,col="grey70",lty=2)
+  
+  rect(xcoord[KIndMin]-xunit/2, ycoord[SparsIndMin]-yunit/2, 
+       xcoord[KIndMin]+xunit/2, ycoord[SparsIndMin]+yunit/2,lty=2,lwd=2)
+  
+  if(!is.null(KInd1se)){  
+    rect(xcoord[KInd1se]-xunit/2, ycoord[SparsInd1se]-yunit/2, 
+         xcoord[KInd1se]+xunit/2, ycoord[SparsInd1se]+yunit/2,lwd=2)
+    
+    if(( abs(KIndMin-KInd1se)+abs(SparsIndMin-SparsInd1se) ) > 0){
+      arrows(x0=xcoord[KIndMin], y0=ycoord[SparsIndMin],
+             x1=xcoord[KInd1se],y1=ycoord[SparsInd1se],length=.06,lwd=2) }
+  }  
+  
+  axis( 1, xcoord, Kgrid[1:maxcomps])
+  axis( 2, ycoord, round(sparsgrid*100,digits=0),las=1,tck=FALSE,hadj=0.5,cex.axis=.85)
+  
+  
+  par( fig=c(.87,1,0,1), new=TRUE )
+  colvec = matrix( seq( plotRan[1],plotRan[2], length=coln+1 ) )
+  image( t(colvec[-1]), col=plotcol, axes=F )
+  axis( 2, c(seq(0, 1, length=coln),1+1/coln)-1/(2*coln), round( colvec, digits=2 ), las=1 )
+  
+  par(mgp=c(3,1,0), fig=c(0,1,0,1) )
+} 
+
+
+
+#### %%%%%%%%%%%%%%% D. Functions for Covariate Adjustment [L] with (SPARSE) COMPONENT-BASED METHODS [X]   %%%%%%%%%%%%%%% ####
+
+#### Functions for SPLS-Adjustment  #####
+
+# Soft-threshold function for univariate response for SPLS
+ust <- function( b, spars ){
+  b.ust <- matrix( 0, length(b), 1 )
+  if ( spars < 1 )    {    valb <- abs(b) - spars * max( abs(b) )
+  b.ust[ valb>=0 ] <- valb[valb>=0] * (sign(b))[valb>=0]}
+  return(b.ust)
+}
+
+# Perform (Sparse) PLS [on X] and save important matrices/vectors, optimized for speed
+SPLS.on.LS <- function(y,x,K,spars,saveall=F){
+  p <- ncol(x)
+  if(spars==0){ xA <- x; A <- 1:p
+  PLS.A <- plsC(xA,y,K)
+  beta.PLS <- PLS.A$Ws%*%solve(t(PLS.A$Ps)%*%PLS.A$Ws)%*%t(PLS.A$Qs)
+  } else{
+    xi <- x; yi <- y; A.old <- c()
+    
+    #2# Do SPLS with K components on Xi for yi to choose the retained variables in set A
+    for(k in 1:K){
+      W.thresh <- mat_x_vec(t(xi),yi) #  t(xi)%*%V%*%zi  # Covariance (X,y) residual
+      what <- ust(W.thresh,spars) # Soft-threshold the W.thresh
+      
+      A <- sort( unique( c( A.old, which(what!=0 ) ) ) ) # add important variables to set A
+      xA <- x[,A,drop=FALSE]
+      
+      ktest <- min(k,length(A))
+      PLS.A <- plsC(xA,y,ktest) # PLS with reduced vars
+      if(k==K){       beta.PLS <- rep(0,p) 
+      beta.PLS[A] <- PLS.A$Ws%*%solve(t(PLS.A$Ps)%*%PLS.A$Ws)%*%t(PLS.A$Qs)
+      }
+      
+      A.old <- A
+      if((Matrix::rcond(t(PLS.A$Ts) %*% PLS.A$Ts) >= .Machine$double.eps) | (k<p)){
+        yi <- y - PLS.A$Ts %*% t(PLS.A$Qs)  
+      }
+    }
+    
+  } # If imposing sparsity, do weighted SPLS to select the relevant variables xA
+  
+  SPLSres <- list(beta.PLS=beta.PLS,A=A)
+  if(saveall==T){ SPLSres[["Ts"]]=PLS.A$Ts; SPLSres[["Ws"]]=PLS.A$Ws; 
+  SPLSres[["Ps"]]=PLS.A$Ps; SPLSres[["Qs"]]=PLS.A$Qs        }
+  return(SPLSres)
+}
+
+# Perform Cross Validation (CV) with Least Squares [on L] and (Sparse) PLS [on X], optimized for speed
+cv.ls.spls <- function(y, x, l, binL.idx=NULL, fold=10,foldlist=NULL, K, spars, orthX=T,mtd.sqn=F,
+                       doAIC=F,plotfitLik=F, scale.x=T,scale.l=F, plot.CV=F,do1setest=F,...){
+  ## A ## Preprocessing data   ## Assuming that y are complete case and relevant. 
+  x <- as.matrix(x);  p <- dim(x)[2]
+  l <- as.matrix(l);  q <- dim(l)[2]
+  r <- p+q # Total number of covariates (# high-dim + low-dim)
+  y <- c(y);   n <- length(y)
+  
+  n.K <- length(K)
+  n.spars <- length(spars)
+  K.pos <- 1:n.K
+  
+  
+  if(is.null(foldlist)){   foldi <- split( sample(1:n), rep(1:fold, length = n) ) 
+  } else {  foldi <- foldlist     }
+  
+  SEPs <- array(rep(NA, n*n.K*n.spars), c(n,n.K,n.spars))
+    
+  cat("\nAnalyzing CV with method:",paste(ifelse(mtd.sqn,"Seqn","Pre"),"Adjustment with", 
+                                          ifelse(orthX,"Orthogonal X","Regular X") ),"\n")
+  
+  ## B ## Cross-Validation Estimation with "fold"-folds for each spars-K pair
+  for(fold.ind in 1:fold){        
+    #1# Delineate observations being held out (training set) [& fit Pre-Adjustment]
+    omit <- foldi[[fold.ind]]
+    y.train <- y[-omit]
+    x.train <- x[-omit,]
+    l.train <- l[-omit,]
+    
+    mean.ytrain <- mean(y.train)
+    mean.ltrain <- apply(l.train, 2, mean )  # save the column means of L for predictions in CVL later
+    mean.xtrain <- apply(x.train, 2, mean )  # save the column means of X for predictions in CVL later
+    
+    l.train.Pre <- scale(l.train,center=mean.ltrain,scale=F)
+    if(scale.l==T){
+      sd.ltrain <- apply( l.train.Pre, 2, sd )  # save the column sd of ctd L for predictions in CVL later
+      if(!is.null(binL.idx)){ sd.ltrain[binL.idx] <- 1  }
+      l.train.Pre <- scale(l.train.Pre,center=F,scale=sd.ltrain)
+    } else{ sd.ltrain <- rep(1, q)   }
+    
+    x.train.Pre <- scale(x.train,center=mean.xtrain,scale=F)
+    if(scale.x==T){
+      sd.xtrain <- apply( x.train.Pre, 2, sd )  # save the column sd of ctd X for predictions in CVL later
+      x.train.Pre <- scale(x.train.Pre,center=F,scale=sd.xtrain)
+    } else{ sd.xtrain <- rep(1, q)   }
+    
+    l.tr.Proj <- l.train.Pre%*%solve(t(l.train.Pre)%*%l.train.Pre ) %*% t(l.train.Pre)
+    y.residual <- (diag(length(y.train)) - l.tr.Proj) %*% (y.train - mean.ytrain)
+    if(orthX==T){ x.Model <- (diag(length(y.train)) - l.tr.Proj) %*%  x.train.Pre 
+    } else{ x.Model <- x.train.Pre  }
+    
+    
+    if(mtd.sqn==F){ 
+      gamma <- solve(t(l.train.Pre)%*%l.train.Pre)%*%t(l.train.Pre)%*%(y.train - mean.ytrain)
+    }
+    
+    #2# Perform actions that depend on components ktest
+    for(k.ind in 1:n.K){       
+      ktest <- K[k.ind]    # Num of components
+      
+      #3# Perform actions that depend on sparsity jtest [mtd+SPLS, & record SEPs]
+      for(j.ind in 1:n.spars){
+        jtest <- spars[j.ind]     # spars percentage
+        
+        if(fold.ind==fold){  cat( paste('spars =',jtest,' comp =',ktest,'\n') ) }
+                
+        # Perform SPLS for any method
+        obj.SPLS <- SPLS.on.LS(y=y.residual,x=x.Model,ktest,jtest)
+        
+        if(mtd.sqn==T){ 
+          gamma <- solve(t(l.train.Pre)%*%l.train.Pre)%*%t(l.train.Pre)%*%(y.train - 
+                                 mean.ytrain - x.train.Pre%*%obj.SPLS$beta.PLS)
+        }
+        
+        ypred <- scale(x[omit,],mean.xtrain,sd.xtrain)%*%obj.SPLS$beta.PLS + 
+          scale(l[omit,],mean.ltrain,sd.ltrain)%*%gamma + mean.ytrain
+        
+        SEPs[omit,k.ind,j.ind] <- (y[omit]-ypred)^2 ## c(n,n.K,n.spars)
+        
+      } # end j.ind sparsity
+    } # end k.ind components
+  } # end fold.ind fold
+  
+  
+  ## C ## Find optimal tuning parameters for SPLS
+  #1# Create MSEP from SEPs
+  MSEPs <- t(apply(SEPs,2:3,function(w) mean(w,na.rm=T)))
+  rownames(MSEPs) <-  spars  
+  colnames(MSEPs) <- paste('K =',K) 
+  
+  #If less than half of folds were fit, remove these cases, since not fully representative
+  Obsfit <- t(apply(SEPs,2:3,function(w)  sum(!is.na(w))/n   ))
+  MSEPs[Obsfit < .5 ] <- NA
+  
+  #2# Identify which spars-K pair leads to minimum MSE (sometimes can be tied)
+  best <- which(MSEPs==min(MSEPs,na.rm=T),arr.ind=T) 
+  if(nrow(best)==1){   K.ind <- best[2] ;   spars.ind <- best[1]  
+  } else{ 
+    whichbest <- select.best.pair(best[1,2],spars[best[1,1]],best[,2],spars[best[,1]],1,-5)  
+    K.ind <- whichbest[1] ;   spars.ind <- which(spars==whichbest[2]); rm(whichbest)
+  } 
+  rm(best)
+  
+  Cutoff <- sqrt(min(MSEPs,na.rm=T)) + sd(sqrt(SEPs[,K.ind,spars.ind])) / sqrt(nrow(SEPs)-1) # Cutoff for 1-se test 
+    
+  
+  K.best.ind <- K.ind  #Placeholders if don't do 1-se test
+  spars.best.ind <- spars.ind
+  
+  spars.opt <- spars.best <- spars[spars.ind]
+  K.opt <- K.best <- K[K.ind]
+  
+  cat("\nMinimum-based parameters: K =",K.opt,"spars =",spars.opt,
+      "with RMSE =",round(sqrt(MSEPs[spars.ind,K.ind]),4),"\n") 
+  
+  #3# Identify which spars-K pairs are within 1-se of the minimum RMSE, and select "best" pair
+  if(do1setest==T){
+    ### 1-se Parameter test: find M and sparsity level### 
+    start.ind <- max(spars.ind - 3, 1) #spars.ind      # Allow a slight loss in sparsity if lower comps
+    
+    bestA <- which(sqrt(MSEPs[start.ind:length(spars),1:K.ind, drop=F]) <= Cutoff,arr.ind=T) 
+    
+    if(nrow(bestA)==1){   K.best.ind <- bestA[2] ;   spars.best.ind <- bestA[1]+start.ind-1  
+    } else{ 
+      whichbest <- select.best.pair(bestA[1,2],spars[bestA[1,1]+start.ind-1],bestA[,2],spars[bestA[,1]+start.ind-1],1,-5)  #SWITCH
+      K.best.ind <- whichbest[1] ;   spars.best.ind <- which(spars==whichbest[2]); rm(whichbest)
+    } 
+    rm(bestA,start.ind)
+    
+    K.best <- K[K.best.ind]
+    spars.best <- spars[spars.best.ind]
+    
+    cat("Adaptive 1-SE parameters: K =",K.best,"spars =",spars.best,
+        "with RMSE =",round(sqrt(MSEPs[spars.best.ind,K.best.ind]),4),"vs Cutoff",round(Cutoff, 4),"\n") 
+    
+  }
+  
+  ## D ## Plot CV RMSE heatmap 
+  if(plot.CV==T){
+    titles <- ifelse(doAIC==T,"AIC","RMSE")
+    if(do1setest==F){ cv.plot(sqrt(MSEPs),Kgrid=K,sparsgrid=spars, KIndMin=K.ind,SparsIndMin=spars.ind,
+                                       objmin=T,title=titles,ytitle="%")
+    } else{  cv.plot(sqrt(MSEPs),Kgrid=K,sparsgrid=spars, KIndMin=K.ind,SparsIndMin=spars.ind,
+                              KInd1se=K.best.ind,SparsInd1se=spars.best.ind, objmin=T,title=titles,ytitle="%")
+    }
+  }
+  
+  ## E ##  Save important CV results
+  cv <- list(MSEPs=MSEPs,SEPs=SEPs,cvlcut=Cutoff, spars.min=spars.opt,K.min=K.opt)
+  
+  if(do1setest==T){     cv[["K.1se"]] <- K.best;  cv[["spars.1se"]] <- spars.best }
+  
+  invisible(cv)
+}
+
+
+
+#### Functions for (S)PCA-Adjustment  #####
+
+# Least Squares adjustment for PCA, optimized for speed with Rcpp
+LSadj4PCA <- function(Ps,Ts, Y, projOffL){  # 
+  projTt <- matmult(t(Ts),projOffL)  # k x n
+  grdnt <- mat_x_vec(projTt,Y)       # k x 1
+  var <- matmult(projTt, Ts)         # k x k
+  projvar <- Ps %*% solve(var)       # p x k
+  beta <- mat_x_vec(projvar, grdnt)  # p x 1
+  return(beta)
+}
+
+# For sparse PCA, create a good grid of sparsity values
+SPCAsparsgrid <- function(Xi,miniS=3,bigs=2,miniB=4){ # Returns a grid of 9 values 
+  
+  bigThresh <- ceiling(2 * max( abs((t(Xi%*% svd(Xi,0,1)$v[,1])%*%Xi)[1,])) )
+  smThresh <- ceiling(bigThresh/10)
+  midThresh <- ceiling(bigThresh*.55)
+  
+  miniS <- miniS+1;   bigs <- bigs+1;  miniB <- miniB + 2
+  
+  spars.grid <- c(seq(from=0,to=smThresh,length.out=miniS)[-miniS], 
+                  seq(from=smThresh,to=midThresh,length.out=bigs)[-bigs],
+                  seq(from=midThresh,to=bigThresh,length.out=miniB)[-c(miniB-1,miniB)])
+  return(spars.grid)
+}
+
+# SPCA for tested sparsity levels [Wrapper of elasticnet::spca and pls::pcr]
+spca4sparsities <- function(trainX,trainY,trainL,testX,testY,testL,trainYmean,sparsgrid,Nspars,comp,ProjOffL){
+  ## A ## Preprocessing data
+  n.test <- length(testY)
+  parmind <- seq(Nspars)  
+  SEP.sp <- matrix(rep(NA, n.test*Nspars), nrow=n.test,ncol=Nspars)  # 140 (700/5) x 9
+  
+  ## B ## Fit SPCA across all possible sparsity levels in sparsgrid
+  for(z in parmind){ # Sparsity amount
+    parm <- rep(sparsgrid[z],comp)
+    
+    #1# Fit SPCA with specific sparsity level to get sparse loading/weight
+    set.seed(316, kind="L'Ecuyer-CMRG")
+    SPCAx <- spca(trainX,K=comp,type="predictor",sparse="penalty",para=parm,max.iter=150)
+    
+    # Get score and loading to get Beta hat, Y hat, and Error^2
+    sLoad <- SPCAx$loadings; Tk <- trainX%*%sLoad
+    
+    #2# Check whether we can obtain new beta computationally, based on invertibility of tTt
+    tT.offL.t <- t(Tk)%*%ProjOffL%*%Tk
+    
+    if(any(diag(tT.offL.t) == 0)){ rm(SPCAx,sLoad,Tk,tT.offL.t); break }
+    
+    # Explanation of condition number: http://mathworld.wolfram.com/ConditionNumber.html
+    if((comp==p) & (rcond(tT.offL.t) < .Machine$double.eps)){ # tolerance is 2.20 e-16
+      cat("Skipping spars index",z," because of non-invertible (T^T T) for",
+          comp,"components ","\n");  rm(SPCAx,sLoad,Tk,tT.offL.t); next } 
+    
+    #3# If tTt invertible, obtain beta hat and SEPs
+    #*** Beta hat, Predicted Y, Squared Error ***#
+    SBeta <- LSadj4PCA(Ps=sLoad, Ts=Tk, Y=trainY, projOffL=ProjOffL)
+    Gamma <- solve(t(trainL)%*%trainL)%*%t(trainL)%*%(trainY - trainX%*%SBeta)
+    
+    Yfit <- testX%*%SBeta + testL%*%Gamma + trainYmean
+    
+    SEP.sp[,z] <- (testY - Yfit)^2  # Fill in n x M x nparm
+    rm(SBeta,Yfit,SPCAx,sLoad,Tk,tT.offL.t,Gamma)
+  } # End sparsity loop
+  
+  return(SEP.sp)
+}
+
+# Perform Cross Validation (CV) with Least Squares [on L] and (Sparse) PCA [on X], optimized for speed where possible
+cv.ls.spca <- function(x,y,l, scale.x=T,scale.l=F,binL.idx=NULL, foldlist=NULL,cv=5,Mtest,parmgrid,
+                    do1setest=T,plot.CV=F,MTHD=c("spcr","pcr"),saveSEPs=F){  # Not yet adapted for q-dim Y.
+  ## A ## Preprocessing data  ## Assuming that y are complete case and relevant.
+ 
+  x <- as.matrix(x);  p <- dim(x)[2]
+  l <- as.matrix(l);  q <- dim(l)[2]
+  r <- p+q # Total number of covariates (# high-dim + low-dim)
+  y <- c(y);   n <- length(y)
+  
+  nMtest <- length(Mtest); Mind <- seq(nMtest)
+  nparm <- length(parmgrid)
+  maxM.possible <- rankMatrix(t(x)%*%x,method='qr')[1]
+  
+  if(is.null(foldlist) ){   foldi <- split( sample(1:n), rep(1:fold, length = n) )
+  } else { foldi <- foldlist   }
+  
+  SEPs <- array(rep(NA, n*nMtest*nparm), c(n,nMtest,nparm))  # 700 x 9 x 9
+  
+  ## B ## Cross-Validation Estimation with "cv"-folds for each parmgrid-M pair (sparsity-component)
+  set.seed(316, kind="L'Ecuyer-CMRG")
+  for(fold in 1:cv){
+    #1# Preprocess data for observations not being held out
+    omit <- foldi[[fold]]
+    
+    y.train <- y[-omit]
+    x.train <- x[-omit,]
+    l.train <- l[-omit,]
+    
+    mean.ytrain <- mean(y.train)
+    mean.ltrain <- apply(l.train, 2, mean )  # save the column means of L for predictions in CVL later
+    mean.xtrain <- apply(x.train, 2, mean )  # save the column means of X for predictions in CVL later
+    
+    l.train.Pre <- scale(l.train,center=mean.ltrain,scale=F)
+    if(scale.l==T){
+      sd.ltrain <- apply( l.train.Pre, 2, sd )  # save the column sd of ctd L for predictions in CVL later
+      if(!is.null(binL.idx)){ sd.ltrain[binL.idx] <- 1  }
+      l.train.Pre <- scale(l.train.Pre,center=F,scale=sd.ltrain)
+    } else{ sd.ltrain <- rep(1, q)   }
+    
+    x.train.Pre <- scale(x.train,center=mean.xtrain,scale=F)
+    if(scale.x==T){
+      sd.xtrain <- apply( x.train.Pre, 2, sd )  # save the column sd of ctd X for predictions in CVL later
+      x.train.Pre <- scale(x.train.Pre,center=F,scale=sd.xtrain)
+    } else{ sd.xtrain <- rep(1, q)   }
+    
+    l.tr.Proj <- l.train.Pre%*%solve(t(l.train.Pre)%*%l.train.Pre ) %*% t(l.train.Pre)
+    offLproj <- diag(length(y.train)) - l.tr.Proj
+    ytrain.ctd <- y.train - mean.ytrain
+  
+    cat("\nC: Begin CV fold",fold,"\n") 
+    
+    if(MTHD=="pcr"){
+      max.comp2test <- min(maxM.possible,max(Mtest)) 
+      pca.via.svd <- svd(x.train.Pre,nu=max.comp2test, nv=max.comp2test)
+    }
+    
+    
+    #2# For each component, fit SPCA across all possible sparsity levels and save SEPs
+    for(mind in Mind){ # No. of components
+      ncomp <- Mtest[mind]
+      
+      if(ncomp > maxM.possible){  
+        cat("Skipping comps",ncomp," and above because rank(cov(X)) is smaller","\n");
+        rm(ncomp); break }
+      
+      if(MTHD=="pcr"){
+        usecomps <- 1:ncomp
+            if(ncomp==1){  Ds <- as.matrix(pca.via.svd$d[1])
+            } else{ Ds <- diag(pca.via.svd$d[usecomps]) }
+        
+        ts <- pca.via.svd$u[,usecomps,drop=F] %*% Ds
+        ps <- pca.via.svd$v[,usecomps,drop=F]
+        
+        Beta <- LSadj4PCA(Ps=ps, Ts=ts, Y=ytrain.ctd, projOffL=offLproj)
+        Gamma <- solve(t(l.train.Pre)%*%l.train.Pre)%*%t(l.train.Pre)%*%(ytrain.ctd-
+                          x.train.Pre%*%Beta)
+        
+        Y.fit <- scale(x[omit,],mean.xtrain,sd.xtrain)%*%Beta + 
+                  scale(l[omit,],mean.ltrain,sd.ltrain)%*%Gamma + mean.ytrain
+        SEPs[omit,mind,1] <- (y[omit] - Y.fit)^2
+        
+        rm(Y.fit)
+      }
+      if(MTHD=="spcr"){
+        SEP.vals <- spca4sparsities(trainX=x.train.Pre,trainY=ytrain.ctd,trainL=l.train.Pre,
+                    trainYmean=mean.ytrain,testY=y[omit],
+                    testX=scale(x[omit,],mean.xtrain,sd.xtrain),testL=scale(l[omit,],mean.ltrain,sd.ltrain),
+                    sparsgrid=parmgrid,Nspars=nparm,comp=ncomp,ProjOffL=offLproj)
+        
+        SEPs[omit,mind,] <- SEP.vals # Fill in n x M x nparm
+      }
+    } # End component loop
+    rm(y.train,x.train,l.train,ytrain.ctd,mean.ytrain,l.train.Pre,x.train.Pre,l.tr.Proj,offLproj )
+    
+  } # end fold loop
+  
+  
+  ## C ## Find optimal tuning parameters for SPCA
+  #1# Create MSEP from SEPs
+  MSEPs <- t(apply(SEPs,2:3,function(w) mean(w,na.rm=T)))
+  rownames(MSEPs) <- paste('spars.id=',1:nparm) 
+  colnames(MSEPs) <-  paste('M =',Mtest) 
+  
+  #If only 1-2 folds of 5 total were fit, remove these cases, since not fully representative
+  Obsfit <- t(apply(SEPs,2:3,function(w)  sum(!is.na(w))/n   ))
+  MSEPs[Obsfit < .5 ] <- NA
+  
+  #2# Identify which parm-M pair leads to minimum MSEP (sometimes can be tied)
+  best <- which(MSEPs==min(MSEPs,na.rm=T),arr.ind=T)
+  
+  if(nrow(best)==1){   M.ind <- best[2] ;   spars.ind <- best[1]  
+  } else{ 
+    mtest <- Mtest[best[,2]] # Comparing actual component values
+    sparstest <- best[,1] # Comparing sparsity unit, not actual sparsity level
+    
+    whichbest <- select.best.pair(Mtest[best[1,2]],best[1,1],mtest,sparstest,2,-1)
+    M.ind <- which(Mtest==whichbest[1]) ;   spars.ind <- whichbest[2]; rm(whichbest,mtest,sparstest)
+  }
+  
+  rm(best)
+  
+  spars.min <- parmgrid[spars.ind]
+  M.min <- Mtest[M.ind]
+  
+  cat("\n \nMinimum-RMSE-based parameters: M =",M.min,"sparsity =",spars.min,"( unit =",spars.ind,")",
+      "with RMSE =",round(sqrt(MSEPs[spars.ind,M.ind]),4),"\n") 
+  
+  Cutoff <- sqrt(min(MSEPs,na.rm=T)) + sd(sqrt(SEPs[,M.ind,spars.ind]),na.rm=T) / sqrt(  sum(!is.na(SEPs[,M.ind,spars.ind])) ) # Cutoff for 1-se test
+  
+  #3# Identify which parm-M pairs are within 1-se of the minimum RMSEP, and select "best" pair
+  if(do1setest==T){
+    start.ind <- max(spars.ind - 1, 1) # Allow a slight loss in sparsity if lower comps
+    
+    bestA <- which(sqrt(MSEPs[start.ind:nparm,1:M.ind, drop=F]) <= Cutoff,arr.ind=T) 
+    
+    if(nrow(bestA)==1){   M.ind.1se <- bestA[2] ;   spars.ind.1se <- bestA[1]+start.ind-1  
+    } else{ 
+      mtest <- Mtest[bestA[,2]] # Comparing actual component values
+      sparstest <- bestA[,1]+start.ind-1 # Comparing sparsity unit, not actual sparsity level
+      
+      whichbest <- select.best.pair(M.min,spars.ind,mtest,sparstest,2,-1)
+      # Here we keep sparsity as the unit between 1 and 9, to keep comparisons the same across simulations
+      M.ind.1se <- which(Mtest==whichbest[1]) ;   spars.ind.1se <- whichbest[2]; rm(whichbest,mtest,sparstest)
+    } 
+    rm(bestA,start.ind)
+    
+    M.1se <- Mtest[M.ind.1se]
+    spars.1se <- parmgrid[spars.ind.1se]
+    
+    cat("\n1-SE-based parameters: M =",M.1se,"sparsity =",spars.1se,"( unit =",spars.ind.1se,")",
+        "with RMSE =",round(sqrt(MSEPs[spars.ind.1se,M.ind.1se]),4),"vs Cutoff",round(Cutoff, 4),"\n") 
+    
+  }
+  
+  ## D ## Plot CV RMSE heatmap 
+  if(plot.CV==T) {
+    if(do1setest==F){ cv.plot(sqrt(MSEPs),Kgrid=Mtest,sparsgrid=1:nparm, KIndMin=M.ind,
+                                      SparsIndMin=spars.ind, objmin=T,title="CV RMSE",ytitle="Unit")
+    } else{  cv.plot(sqrt(MSEPs),Kgrid=Mtest,sparsgrid=1:nparm, KIndMin=M.ind,SparsIndMin=spars.ind,
+                              KInd1se=M.ind.1se,SparsInd1se=spars.ind.1se, objmin=T,title="CV RMSE",ytitle="Unit")
+    }
+  }
+  
+  ## E ##  Save important CV results
+  cv <- list(MSEPs=MSEPs,Cutoff=Cutoff, spars.min=spars.min, M.min=M.min, M.grid=Mtest,spars.grid=parmgrid)
+  
+  if(do1setest==T){   cv[["spars.1se"]] <- spars.1se;  cv[["M.1se"]] <- M.1se   }
+  if(saveSEPs==T){  cv[["SEPs"]] <- SEPs ;  cv[["Obsfit"]] <-  Obsfit }
+  
+  invisible(cv)
+  
+}
+
+
+
+#### %%%%%%%%%%%%%%% E. Run Covariate Adjustment Models on MESA  %%%%%%%%%%%%%%% ####
+
+#### SPLS ####
+
+   # 10-fold Cross-Validation to select ideal tuning parameters (components/sparsity)
+   CVset <- cv.ls.spls(y=BMIy, x=X, l=L, binL.idx=bin.L.id, fold=nfold,foldlist=segments, K=comptest, spars=sparstest,
+         orthX=T,mtd.sqn=T ,doAIC=F,plotfitLik=F, scale.x=scale.x,scale.l=scale.l, plot.CV=T,do1setest=do.1se)
+ 
+    # Save CV results to fit final model later [outside of computer cluster]
+   CVres <- list('cvSPLS'=CVset,'comptest'=comptest,'sparstest'=sparstest,'orthX'=T,'sqn.mtd'=T)
+   save(CVres, file=paste("MESA-Res-cvSPLS-NEW.Rda",sep=""))
+ 
+
+ 
+#### PLS ####
+   sparstest <- sparstest[1] # Set sparsity level at 0% for PLS
+    
+   # 10-fold Cross-Validation to select ideal tuning parameter (components)
+   CVset <- cv.ls.spls(y=BMIy, x=X, l=L, binL.idx=bin.L.id, fold=nfold,foldlist=segments, K=comptest, spars=sparstest,
+                       orthX=T,mtd.sqn=T ,doAIC=F,plotfitLik=F, scale.x=scale.x,scale.l=scale.l, plot.CV=T,do1setest=do.1se)
+   
+   # Save CV results to fit final model later [outside of computer cluster]
+   CVres <- list('cvSPLS'=CVset,'comptest'=comptest,'sparstest'=sparstest,'orthX'=T,'sqn.mtd'=T)
+   save(CVres, file=paste("MESA-Res-cvPLS-NEW.Rda",sep="")) 
+   
+ 
+
+#### Lasso ####
+   L <- as.matrix(L)
+   
+   # 10-fold Cross-Validation to select ideal tuning parameter (sparsity lambda) AND final fit
+   set.seed(316, kind="L'Ecuyer-CMRG")
+     Lasso <- cv.glmnet(x=cbind(X,L), y=BMIy, family="gaussian", alpha=1,standardize=scale.x,
+                        nfolds=fold,foldid=segmentvector,maxit=2000,penalty.factor=c(rep(1,p),rep(0,q)) )
+   
+   # Identify ideal tuning parameter (sparsity lambda)
+   Lambda <- Lasso$lambda.1se   
+   if(Lambda==Lasso$lambda[1]){ Lambda <- Lasso$lambda[2]}  # In case it selects no variables
+
+   if(do.1se==T){ selLam <- Lambda} 
+   Lamb.indx <- which(Lasso$lambda==selLam)
+ 
+   # From Modeled data, save Betas, length of non-0s, and CV-RMSEP
+   Lasso.Beta <- as.vector(coef(Lasso, s=selLam))[-1]
+ 
+   Sel.P <- which(Lasso.Beta[1:p] != 0)
+   bigord <- order(abs(Lasso.Beta[1:p]),decreasing=T)
+    
+   Dev <- Lasso$cvm[Lamb.indx]   # Cross validation RMSEP
+
+   # Identify Training Metrics
+   y.pred <- c(t(Lasso.Beta[1:p])%*%t(X)) +  c(t(Lasso.Beta[p+ (1:q)])%*%t(L))  + mean(BMIy)
+   RMSE <- sqrt(mean((BMIy-y.pred)^2))
+   R2 <- summary(lm(BMIy~y.pred))$r.squared
+ 
+   # Save CV results and final model fit results to view later [outside of computer cluster]
+   LRes  <- list('Lasso'=Lasso,'Betas'=Lasso.Beta,'Lambda'=Lambda,'Sel.Vars'=Sel.P,'cvRMSE'=Dev,'Convg2Max'=(selLam==min(Lasso$lambda)),
+               'R2'=R2,'RMSE'=RMSE )
+ 
+   save(LRes, file=paste("MESA-Res-cvLASSO-NEW.Rda",sep=""))
+
+
+
+#### PCR ####
+   
+   # 10-fold Cross-Validation to select ideal tuning parameter (components)
+   CVset <- cv.ls.spca(y=BMIy, x=X, l=L,scale.x=scale.x,scale.l=scale.l,binL.idx=bin.L.id,cv=nfold,foldlist=segments, 
+                    Mtest=1:120,parmgrid=0, do1setest=do.1se,plot.CV=F, MTHD="pcr")
+   
+   # Save CV results to fit final model later [outside of computer cluster]
+   CVres <- list('cvSPCR'=CVset,'comptest'=1:120,'sparstest'=0,'method'="pcr")
+   save(CVres, file=paste("MESA-Res-cvPCR-NEW.Rda",sep=""))
+   
+
+
+#### SPCR ####
+
+   nfold <- 5
+   set.seed(316, kind="L'Ecuyer-CMRG"); segments <- cvsegments(n, k=nfold)  
+
+   FullscX <- PLSscaleX(X) 
+   CVparmgrid <- SPCAsparsgrid(FullscX,3,2,4); rm(FullscX)
+  
+   # 5-fold Cross-Validation to select ideal tuning parameter (components/sparsity)
+   CVset <- cv.ls.spca(y=BMIy, x=X, l=L,scale.x=scale.x,scale.l=scale.l,binL.idx=bin.L.id,cv=nfold,foldlist=segments, 
+                    Mtest=1:120,parmgrid=CVparmgrid, do1setest=do.1se,plot.CV=F, MTHD="spcr",saveSEPs=T)
+                    
+   # Save CV results to fit final model later [outside of computer cluster]
+   CVres <- list('cvSPCR'=CVset,'comptest'=1:120,'sparstest'=CVparmgrid,'method'="spcr")
+   save(CVres, file=paste("MESA-Res-cvSPCR-NEW.Rda",sep="")) 
+  
+
+
+###### NOTE: This is the end of the code that was run on a computer cluster. ######
+
+############################################################################################
+############################################################################################
+
+###### NOTE: The following code was run on a single computer. ######
+
+
+
+#### %%%%%%%%%%%%%%% F. Functions for Final Data Analysis Results  %%%%%%%%%%%%%%% ####
+
+#### MultiBlock Variables and Functions for X ####
+
+ # Descriptions of food groups for plots and multiblock functions
+ ftyp <- c("Fruit","Veg.","Grain","Protein","Mixed Ent.","Dairy","Sweet/Oil","Bev.")
+ block.p <- c(12,	11,	12,	19	,30	,8,	17,	11)
+ nblock <- length(block.p); start.x <- c(0,cumsum(block.p))+1; end.x <- cumsum(block.p)
+
+
+sqrt.sum.squares <- function(x){sqrt(t(x)%*%x)}
+
+
+# Extract multiblock weights from (S)PLS or (S)PCA saved matrices [P and/or W]
+getMBwts <- function(comp.mthd=c("pls","pca"),Ps,PLS.Ws=NULL,Selcomps,SelvarsIndx,startX,endX,num.block,num.p,
+                     saveWtmat=F){
+  #1# Create proper weights and predictor counters, especially for sparse methods
+  redP <- length(SelvarsIndx)  # Reduced/selected predictors
+  
+  if(comp.mthd=="pls"){
+    Wtmat <-  PLS.Ws%*% solve(t(Ps) %*% PLS.Ws)  # Transform to R wt
+    if(Selcomps>1){    for(k in 2:Selcomps){
+      Wtmat[,k] <- Wtmat[,k]/c(sqrt.sum.squares(Wtmat[,k]))    }; rm(k)
+    }  
+  }
+  if(comp.mthd=="pca"){ 
+    Wtmat <- Ps; Wtmat[-SelvarsIndx,] <- 0    # Use loadings P
+    for(k in 1:Selcomps){
+      Wtmat[,k] <- Wtmat[,k]/c(sqrt.sum.squares(Wtmat[,k]))    }; rm(k)
+  }
+  
+  # Create reduced counters to account for only selected predictors and groups
+  redNB <- 0; redBlocks <- NULL; red2fullBlock <- NULL
+  for(nb in 1:num.block){ seq.mb <- startX[nb]:endX[nb]
+  n.vars.in.bl <- length(which(SelvarsIndx %in% seq.mb))
+  
+  if( n.vars.in.bl > 0 ){     redNB <- redNB + 1 
+  redBlocks <- c(redBlocks, rep(redNB, n.vars.in.bl ) )
+  red2fullBlock <- c(red2fullBlock, nb)
+  }
+  rm(seq.mb,n.vars.in.bl,nb)
+  }
+    
+  #2# Recover MB weights by scaling weights
+  w.b <- matrix(NA, nrow=redP,ncol=Selcomps) # w.b # block weight. * p x K *
+  w.g <- matrix(NA, nrow=redNB,ncol=Selcomps) # w.g # global weight. * NB x K *
+  
+  for(comp in 1:Selcomps){
+    for(nb in 1:redNB){   seq.mb <- which(redBlocks==nb)
+     if(comp.mthd=="pls"){ 
+      w.g[nb,comp] <- sqrt.sum.squares(Wtmat[seq.mb,comp])
+      w.b[seq.mb,comp] <- Wtmat[seq.mb,comp] %*% solve(w.g[nb,comp])
+      }
+    
+     if(comp.mthd=="pca"){ 
+      w.g[nb,comp] <- sqrt.sum.squares(Wtmat[SelvarsIndx[seq.mb],comp])
+      w.b[seq.mb,comp] <- Wtmat[SelvarsIndx[seq.mb],comp] %*% solve(w.g[nb,comp])
+      }
+    }
+  }
+  
+  #3# Fill in Multiblock weights into matrices with all predictors (as opposed to only selected predictors)
+  Full.w.b <- matrix(0, nrow=num.p,ncol=Selcomps)  # block weight
+  Full.w.g <- matrix(0, nrow=num.block,ncol=Selcomps) # global weight
+  
+  Full.w.b[SelvarsIndx,] <- w.b 
+  Full.w.g[red2fullBlock,] <- w.g 
+  
+  Res <- list("W.b"=Full.w.b,"W.g"=Full.w.g)
+  if(saveWtmat==T){ Res[["FullWt"]] <- Wtmat  }
+  invisible(Res)
+}
+
+
+# Create multiblock plot [like Figure 2] #
+mb.plot <- function(gb.wt, bl.wt,comps2plot=c(1,2),file.nam="SPLS-Components.png",
+                         save.it=F, Gr.names=ftyp,nam.sup=T,betas=SPLSRes$Betas,tiny=F){
+   # gb.wt: Global Weight;  bl.wt: Block Weight
+   # comps2plot: Which components to plot
+   # save.it: Whether or not to save the plot; file.nam: Name of plot, if saving
+   # Gr.names: Block group names (e.g., food group)
+   # nam.sup: Whether or not predictor names are supplied in external variables `flabel1a’, b, and c
+   # betas: Vector of betas to indicate whether sign is + or –
+   # tiny: Whether or not to add labels for predictors and groups that have a small contribution (e.g., if labels are numbers, it could be preferred, but not if labels are words)
+
+  ## A ## Header info for plot (save name, plot dimensions)
+  if(save.it==T){  png(file.nam,height=4.5,width=5*length(comps2plot),units="in", res=130) }
+  par(mfrow=c(1,length(comps2plot)),mar=c(1.8, 1.6, .5, 1.6),mgp=c(0,0,0))  # or par(mfrow=c(1,2),mar=c(1.1, 1.6, 1.5, 0),mgp=c(0,0,0))
+  
+  ## B ## Plot for each component
+  for(comp in comps2plot){
+    
+    # 1 # Squared global and block weights (add up to 100% each); sort by size
+    wg.2 <- gb.wt[,comp]^2;  wb.2 <- bl.wt[,comp]^2 
+    
+    grOrd <- order(wg.2,decreasing=T) #largest to smallest; if tie, just lists in order of input (1, 2, 3...)
+    
+    # 2 # Create list that indicates cumulative ordering of block weights
+    blOrd <- vector("list",length=nblock)
+    prev.block.p <- c(0,end.X[-nblock])
+    for(b in 1:nblock){
+      seq.mb <- start.X[b]:end.X[b]
+      blOrd[[b]] <- order(wb.2[seq.mb],decreasing=T)+prev.block.p[b]
+    }
+    
+    # 3 # Begin actual plot, axis titles, and axes labels
+    plot(0:1,0:1,type="n",ylim=c(0,1),xlim=c(0,1),axes=F,xlab="",ylab="")    
+    axis(2,at=seq(0,1,by=.2),labels=paste(seq(0,100,by=20),"%",sep=""),tck=-.01,pos=0,las=2,cex.axis=.8)
+    axis(4,at=seq(0,1,by=.2),labels=paste(seq(0,100,by=20),"%",sep=""),tck=-.01,pos=1,las=2,cex.axis=.8)
+    
+    mtext(expression(paste(bold("Foods")," Most Related to BMI, Within Food Groups")),
+          2,.6,cex=.92)
+    mtext(expression(paste( bold("Food Groups"), " Most Related to BMI" )),
+          1,.9,cex=.92)
+    text(x=.5,y=1.05,paste("SPLS Pattern",comp),font=2,xpd=T)
+    
+    # 4 # Create variable with vertical cuts (by w.g.2 for diff groups)
+    vcuts <- c(0,cumsum(wg.2[grOrd]))
+    for(j in 1:(nblock+1)){   segments(vcuts[j],0,vcuts[j],1) }
+    
+    # 5 # Create variable with horizontal cuts (by w.b.2 for diff foods in each group)
+    for(z in 1:nblock){
+      b <- grOrd[z]
+      hcuts <- c(1,1-cumsum(wb.2[ blOrd[[b]] ]))
+      for(j in 1:(block.p[b]+1)){   segments(vcuts[z],hcuts[j],vcuts[z+1],hcuts[j],col="black")
+        labelfood <- NA  
+        
+        # 6 # For groups and foods that are important enough in magnitude, label them in top center of their rectangle
+        if((j <= block.p[b])&(hcuts[j]-hcuts[j+1] > ifelse(tiny==T,.03,.05))&(vcuts[z+1]-vcuts[z]>.03)){  
+          if(vcuts[z+1]-vcuts[z]>= ifelse(tiny==T,.03,.1) ){ 
+            foods2print <- blOrd[[b]][j] 
+            
+            if(comp==1 && nam.sup==T){ labelfood <- flabel1a[foods2print] 
+            } else if(comp==2 && nam.sup==T){ labelfood <- flabel2a[foods2print] 
+            } else {  labelfood <- foods2print  }
+            text(x=(vcuts[z]+vcuts[z+1])/2, y=(hcuts[j]-.02), labelfood, col="black",cex=.9) 
+            
+            if(comp==1 && nam.sup==T){ labelfood <- flabel1b[foods2print] 
+            } else if(comp==2 && nam.sup==T){ labelfood <- flabel2b[foods2print] 
+            } else {  labelfood <- orFFQ[foods2print,1]  }
+            text(x=(vcuts[z]+vcuts[z+1])/2, y=(hcuts[j]-.05), labelfood, col="black",cex=.9) 
+            
+            if(comp==1 && nam.sup==T){ labelfood <- flabel1c[foods2print] 
+            } else if(comp==2 && nam.sup==T){ labelfood <- flabel2c[foods2print] 
+            } else {  labelfood <- sign(betas[foods2print])  }
+            text(x=(vcuts[z]+vcuts[z+1])/2, y=(hcuts[j]-.08), labelfood, col="black",cex=.9) 
+            
+          } }
+      }
+      
+      # 7 # For groups that are important enough in magnitude, label at the bottom with name and % (w.g.2)
+      if(vcuts[z+1]-vcuts[z]>.03){    text(x=(vcuts[z]+vcuts[z+1])/2,y=-.06,Gr.names[b],cex=.9,xpd=T)
+        text(x=(vcuts[z]+vcuts[z+1])/2,y=-.02, paste(round(wg.2[grOrd][z]*100,0),"%",sep=""),xpd=T,cex=.8)}
+    }  # Ends the internal plot by block
+    
+  }  # Ends no. comp loop
+  
+  ## C ## Finish plot for each component and return the main details
+  par(mfrow=c(1,1),mar=c(3.5, 3.5, 2.1, 0.1),mgp=c(3,1,0)); 
+  if(save.it==T){ dev.off() }
+  
+  mbres <- list(wg.2=wg.2,wb.2=wb.2,comps=comps2plot)
+  invisible(mbres)
+}
+
+
+
+#### Function to fit final (S)PLS model with covariate adjustment on MESA ####
+
+report.ls.spls.mesa <- function(y,x,l, binL.idx=NULL,K.choice,spars.choice, scale.x=T,scale.l=T,
+                           doMB=F,numblock=nblock,start.X=NULL,end.X=NULL, mtd.sqn=F, orthX=T){
+  p <- ncol(x); q <- ncol(l); n <- length(y)
+  mean.y <- mean(y);   mean.l <- apply(l, 2, mean ) ; mean.x <- apply(x, 2, mean ) 
+  
+  l.Pre <- scale(l,center=mean.l,scale=F)
+  if(scale.l==T){
+    sd.l <- apply( l.Pre, 2, sd )  # save the column sd of ctd L for predictions in CVL later
+    if(!is.null(binL.idx)){ sd.l[binL.idx] <- 1  }
+    l.Pre <- scale(l.Pre,center=F,scale=sd.l)
+  } else{ sd.l <- rep(1, q)   }
+  
+  x.Pre <- scale(x,center=mean.x,scale=F)
+  if(scale.x==T){
+    sd.x <- apply( scale(x,mean.x,F), 2, sd )  # save the column sd of ctd X for predictions in CVL later
+    x.Pre <- scale(x.Pre,center=F,scale=sd.x)
+  } else{ sd.x <- rep(1, q)   }
+  
+  
+  l.Pre.Proj <- l.Pre%*%solve(t(l.Pre)%*%l.Pre ) %*% t(l.Pre)
+  y.residual <- (diag(n) - l.Pre.Proj) %*% (y - mean.y)
+  if(orthX==T){ x.Model <- (diag(n) - l.Pre.Proj) %*%  x.Pre 
+  } else{ x.Model <- x.Pre  }
+  
+  if(mtd.sqn==F){   gamma <- solve(t(l.Pre)%*%l.Pre)%*%t(l.Pre)%*%(y - mean.y)     }
+  
+  ## A ## Fit SPLS with selected parameters on full train data ## 
+  SPLS <- SPLS.on.LS(y=y.residual,x=x.Model,K=K.choice,spars=spars.choice,saveall=T)
+  
+  if(mtd.sqn==T){ gamma <- solve(t(l.Pre)%*%l.Pre)%*%t(l.Pre)%*%(y - mean.y -
+                                                                   x.Pre%*% SPLS$beta.PLS)     }
+  
+  ## B ## Predict Ynew using above training model and get metrics ## 
+  CoefFit <- c(SPLS$beta.PLS, gamma)
+  
+    # Training Metrics
+    y.pred <- x.Pre%*%SPLS$beta.PLS + l.Pre%*%gamma + mean.y
+    RMSE <- sqrt(mean((y-y.pred)^2))
+    R2 <- summary(lm(y~y.pred))$r.squared 
+ 
+    y.pred.X <- x.Pre%*%SPLS$beta.PLS 
+    y.pred.L <- l.Pre%*%gamma 
+    R2.X <- summary(lm(y-mean.y~y.pred.X))$r.squared 
+    R2.L <- summary(lm(y-mean.y~y.pred.L))$r.squared 
+  
+  
+  ## C ## Save SPLS results ##
+  res <- list("coef"=CoefFit, "RMSE"=RMSE,"R2"=R2, "A"=SPLS$A,"R2.X"=R2.X, "R2.L"=R2.L)
+  
+  ## D ## MBPLS wrapper to get MultiBlock and regular SPLS weights ##
+  if(doMB==T){
+    
+    SPLS.MB <- getMBwts(comp.mthd="pls",Ps=SPLS$Ps,PLS.Ws=SPLS$Ws, Selcomps=K.choice,SelvarsIndx=SPLS$A,
+                            startX=start.X,endX=end.X,num.block=numblock,num.p=p)
+ 
+    #3# Save final SPLS MB items
+    SPLS.Weight <- matrix(0, nrow=p,ncol=K.choice) 
+    SPLS.Weight[SPLS$A,] <- SPLS$Ws
+   
+    res[["SPLS.Weight"]] <- SPLS.Weight; res[["SPLS.r.g"]] <- SPLS.MB$W.g; res[["SPLS.r.b"]] <- SPLS.MB$W.b
+  }
+  
+  
+  invisible(res)
+}
+
+
+
+#### Function to fit final (S)PCA model with covariate adjustment on MESA ####
+
+report.ls.spca.mesa <- function(y,x,l, binL.idx=NULL,M.choice,spars.choice=NULL, scale.x=T,scale.l=T,
+                                doMB=F,numblock=nblock,start.X=NULL,end.X=NULL, MTHD=c("spcr","pcr")){
+  p <- ncol(x); q <- ncol(l); n <- length(y)
+  mean.y <- mean(y);   mean.l <- apply(l, 2, mean ) ; mean.x <- apply(x, 2, mean ) 
+  
+  l.Pre <- scale(l,center=mean.l,scale=F)
+  if(scale.l==T){
+    sd.l <- apply( l.Pre, 2, sd )  # save the column sd of ctd L for predictions in CVL later
+    if(!is.null(binL.idx)){ sd.l[binL.idx] <- 1  }
+    l.Pre <- scale(l.Pre,center=F,scale=sd.l)
+  } else{ sd.l <- rep(1, q)   }
+  
+  x.Pre <- scale(x,center=mean.x,scale=F)
+  if(scale.x==T){
+    sd.x <- apply( scale(x,mean.x,F), 2, sd )  # save the column sd of ctd X for predictions in CVL later
+    x.Pre <- scale(x.Pre,center=F,scale=sd.x)
+  } else{ sd.x <- rep(1, q)   }
+  
+  
+  l.Pre.Proj <- l.Pre%*%solve(t(l.Pre)%*%l.Pre ) %*% t(l.Pre)
+  OffLproj <- diag(n) - l.Pre.Proj
+
+  y.ctd <- y - mean.y
+  
+  ## A ## Fit (S)PCA with selected parameters and save results ## 
+  if(MTHD=="pcr"){
+    pca.via.svd <- svd(x.Pre,nu=M.choice, nv=M.choice)
+    
+    if(M.choice==1){  Ds <- as.matrix(pca.via.svd$d[1])
+    } else{ Ds <- diag(pca.via.svd$d[1:M.choice]) }
+    
+    ts <- pca.via.svd$u %*% Ds
+    ps <- pca.via.svd$v
+  }
+  
+  if(MTHD=="spcr"){
+    set.seed(316, kind="L'Ecuyer-CMRG")
+    SPCA <- spca(x.Pre,K=M.choice,type="predictor",sparse="penalty",para=rep(spars.choice,M.choice),max.iter=150)
+    ps <- SPCA$loadings; ts <- x.Pre%*%ps
+  }
+  
+  Beta <- LSadj4PCA(Ps=ps, Ts=ts, Y=y.ctd, projOffL=OffLproj)
+  Gamma <- solve(t(l.Pre)%*%l.Pre)%*%t(l.Pre)%*%(y.ctd - x.Pre%*% Beta)     
+  CoefFit <- c(Beta, Gamma)
+
+  ## B ## Predict Ynew using above training model and get metrics ## 
+  # Training Metrics
+  y.pred <- x.Pre%*%Beta + l.Pre%*%Gamma + mean.y
+  RMSE <- sqrt(mean((y-y.pred)^2))
+  R2 <- summary(lm(y~y.pred))$r.squared 
+  
+  y.pred.X <- x.Pre%*%Beta  #+ mean.y
+  y.pred.L <- l.Pre%*%Gamma  #+ mean.y
+  R2.X <- summary(lm(y.ctd~y.pred.X))$r.squared 
+  R2.L <- summary(lm(y.ctd~y.pred.L))$r.squared 
+  
+  # Selection Metrics
+  selvars <- which(Beta!=0)
+  VarsPerComp <- apply(ps[selvars,],2,function(p)  length(which(p!=0)) ) # Selected Variables per Component
+  
+  ## C ## Save SPCA results ##
+  res <- list("coef"=CoefFit,"RMSE"=RMSE,"R2"=R2,"A"=selvars,"VarsPerComp"=VarsPerComp,"R2.X"=R2.X,"R2.L"=R2.L)
+  
+  ## D ## Save components and regular P weights/loadings to plot MultiBlock (MB) graphs later ##
+  if(doMB==T){    res[["Ts"]] <- ts;  res[["Ps"]] <- ps }
+  }
+  
+  
+  invisible(res)
+}
+
+
+
+#### %%%%%%%%%%%%%%% G. Fit and Plot Final Covariate Adjustment Models on MESA  %%%%%%%%%%%%%%% ####
+
+   #### SPLS ####
+   load("MESA-Res-cvSPLS-NEW.Rda")
+    
+   # Fit SPLS with selected parameters [and save MB weights]
+   spls1se <- report.ls.spls.mesa(y=BMIy,x=X,l=L, binL.idx=bin.L.id,K.choice=CVres$cvSPLS$K.1se, 
+                           spars.choice=CVres$cvSPLS$spars.1se, scale.x=T,scale.l=T,doMB=T,numblock=nblock,
+                           start.X=start.x,end.X=end.x, mtd.sqn=T, orthX=T)
+  
+   round(c(spls1se$R2,spls1se$RMSE),3)
+   length(spls1se$A) # How many foods (x) were selected
+  
+    
+   # Create variables and food labels for multiblock plots
+    start.X <- start.x; end.X <- end.x 
+    
+    flabel1c <-  flabel2c <- round(spls1se$coef[1:p],2)
+    flabel2c <- 0 * flabel1c
+    flabel2c[spls1se$coef[1:p] < 0] <- "-"
+    flabel2c[spls1se$coef[1:p] > 0] <- "+"
+    
+    # Construct multiblock plot [Figure 2]
+    mb.plot(as.matrix(spls1se$SPLS.r.g), as.matrix(spls1se$SPLS.r.b),comps2plot=c(1,2),
+                 file.nam="MESA-Res-NEW-SPLS-1se-MBs-rwts.png", save.it=T, Gr.names=ftyp,nam.sup=T)
+          
+      
+   #### PLS ####
+   load("MESA-Res-cvPLS-NEW.Rda") 
+  
+   # Fit PLS with selected parameters [and save MB weights]
+   pls1se <- report.ls.spls.mesa(y=BMIy,x=X,l=L, binL.idx=bin.L.id,K.choice=CVres$cvSPLS$K.1se, 
+                                   spars.choice=CVres$cvSPLS$spars.1se, scale.x=T,scale.l=T,doMB=T,numblock=nblock,
+                                   start.X=start.x,end.X=end.x, mtd.sqn=T, orthX=T)
+    
+    round(c(pls1se$R2, pls1se$RMSE),3)
+   
+ 
+   #### Lasso #### 
+   load("MESA-Res-cvLASSO-NEW.Rda") 
+  
+   round(c(LRes$R2, LRes$RMSE),3)
+   length(LRes$Sel.Vars)  # How many foods (x) were selected
+
+
+   #### PCR ####
+   load("MESA-Res-cvPCR-NEW.Rda")  
+   
+   # Fit PCR with selected parameters [and save MB weights]
+   pcr1se <- report.ls.spca.mesa(y=BMIy,x=X,l=Lmesa, binL.idx=bin.L.id,M.choice=CVres$cvSPCR$M.1se, 
+                               spars.choice=CVres$cvSPCR$spars.1se, scale.x=T,scale.l=T,doMB=T,numblock=nblock,
+                               start.X=start.x,end.X=end.x, MTHD="pcr")
+    
+    round(c(pcr1se$R2, pcr1se$RMSE),3)
+    
+    # Create variables and food labels for multiblock plots
+    flabel1c <-  flabel2c <- round(pcr1se$coef[1:p],2)
+    flabel2c <- 0 * flabel1c
+    flabel2c[pcr1se$coef[1:p] < 0] <- "-"
+    flabel2c[pcr1se$coef[1:p] > 0] <- "+"
+    
+    # Construct multiblock plot
+    mb.plot(pcr1se$SPCA.p.g, pcr1se$SPCA.p.b,comps2plot=c(1,2),
+                 file.nam="MESA-Res-NEW-PCR-1se-MBs.png", save.it=T, Gr.names=ftyp,nam.sup=T)
+    
+
+   #### SPCR ####
+   load("MESA-Res-cvSPCR-NEW.Rda")  
+    
+   # Fit SPCR with selected parameters [and save MB weights]
+   Spcr1se <- report.ls.spca.mesa(y=BMIy,x=Xbmi,l=Lmesa, binL.idx=bin.L.id,M.choice=CVres$cvSPCR$M.1se, 
+                                spars.choice=CVres$cvSPCR$spars.1se, scale.x=T,scale.l=T,doMB=T,numblock=nblock,
+                                start.X=start.x,end.X=end.x,  MTHD="spcr")
+        
+    round(c(Spcr1se$R2, Spcr1se$RMSE),3)
+    length(Spcr1se$A) # How many foods (x) were selected
+   
+    
+   #### Print regression coefficient plot [Figure 3] ####
+
+# Create food group titles to fit on plot
+  ftyp <- c("Fruits","Veggies","Grains","Proteins","Mixed Entrees","Dairy","Sweets/Oils","Bev'gs")
+
+# Create color, symbol, and line preferences for five methods
+  methpch <- c(NA,20,NA,1,4) 
+  methcol <- c("black","black","red","firebrick3","blue") 
+  methlty <- c(1,0,2,0,0)
+  methlwd <- c(1,1,1,2,2)
+
+# Fill in regression coefficients for each method
+    Betas <- matrix(NA,nrow=120,ncol=5)
+    Betas[,1] <- pcr1se$coef[1:120]; Betas[,2] <- Spcr1se$coef[1:120];  
+    Betas[,3] <- pls1se$coef[1:120]; Betas[,4] <- spls1se$coef[1:120]; Betas[,5] <- LRes$Betas[1:120]
+
+    betaran <- range(c(Betas),na.rm=T)
+    plotran <- c(-.75,.75)
+
+# Identify which foods achieved a large coefficient magnitude with any method
+    interest <- unique(sort(c(which(abs(Betas[,1]) > .25),which(abs(Betas[,2]) > .25), 
+                              which(abs(Betas[,3]) > .25), which(abs(Betas[,4]) > .25), which(abs(Betas[,5]) > .25))))
+
+# Create text labels for foods that achieve a large enough magnitude coefficient with any method
+    flabel1 <- flabel2 <- flabel3 <-  rep(NA,9)
+    flabel1 <- c("lettuce","Sweet","Hamburger","Milk","Chips","Fries",
+                 "Sugar/","Diet soda","Wine")
+    flabel2 <- c("green","potato",NA,"Low-fat",NA,NA,"honey in",NA,NA)
+    flabel3 <- c("Light",NA,NA,NA,NA,NA,"coffee/tea",NA,NA)
+    
+ # Construct plot 
+
+    png(paste("MESA-Res-Betas-NEW.png",sep=""),height=5,width=8,units="in", res=130)
+    par(mar=c(3.5, 3.5, 2.1, 0.1),mgp=c(2.2,1,0))
+    
+    plot(1:120,type="n",ylim=plotran,xaxt="n",xlab="",ylab="Regression Coefficient")    
+    
+    rect(end.X[1]+.5, par("usr")[3],end.X[2]+.5, par("usr")[4],density=NA,col="grey85",xpd=F)
+    rect(end.X[3]+.5, par("usr")[3],end.X[4]+.5, par("usr")[4],density=NA,col="grey85",xpd=F)
+    rect(end.X[5]+.5, par("usr")[3],end.X[6]+.5, par("usr")[4],density=NA,col="grey85",xpd=F)
+    rect(end.X[7]+.5, par("usr")[3],end.X[8]+.5, par("usr")[4],density=NA,col="grey85",xpd=F)
+    
+    abline(h=0);  abline(h=seq(.2,.6,.2),col="grey75");   abline(h=-seq(.2,.8,.2),col="grey75")
+    
+    for(md in c(1:5)){
+      ind <- which(Betas[,md]!=0)
+      points(x=1:120,y=Betas[,md],type="l",lty=methlty[md],col=methcol[md])
+      points(x=ind,y=Betas[ind,md],pch=methpch[md],col=methcol[md],lwd=methlwd[md])
+    }
+    
+    axis(1,at=c(1,seq(10,120,by=10)),las=0,cex.axis=1)
+    mtext("Food Index", 1,2,cex=.92)
+    axis.break(2, .73, style = "zigzag") #  Axis break mark
+    
+    # For foods of interest that achieved a large magnitude, determine which of its coefficients is largest (e.g., which method)
+    int.col <- apply(abs(Betas[interest,]),1,which.max)
+    int.col[3] <- 4   # Can’t plot hamburger label at Lasso coefficient because it is outside the plot
+    int.ht <- 0*int.col
+    for(var in 1:length(interest)){
+      int.ht[var] <- Betas[interest[var],int.col[var]]
+    }
+    
+    int.ht <- int.ht + .04*(int.ht>0) -.04*(int.ht<0)
+    interest[5] <- interest[5]+4 # Shift chips label as it’s crowded with fries and milk
+    int.ht[5] <- int.ht[5]-.04
+     
+    # Print food labels for those of interest
+    text(interest,int.ht,flabel1,cex=.8)
+    text(interest,int.ht-.045*(int.ht<0)+.045*(int.ht>0),flabel2,cex=.8)
+    text(interest,int.ht-.09*(int.ht<0)+.09*(int.ht>0),flabel3,cex=.8)
+    
+    # Print hamburger label and Lasso coefficient at top of the plot
+    points(x=interest[3],y=.78,pch=methpch[5],col=methcol[5],lwd=methlwd[5])
+    text(interest[3]+5,.78,round( Betas[interest[3],5],digits=2),col=methcol[5],cex=.8)
+    
+    fg.x <- apply(cbind(start.X[-9],end.X),1,mean)
+    axis(3,at=fg.x,labels=ftyp,las=0,cex.axis=1,tck=0,padj=1,gap.axis=.1)
+    
+    legend("bottomleft",title="Method",legend=c("PCR","SPCR","PLS","SPLS","Lasso"), lty=methlty,pch=methpch,lwd=methlwd,col=methcol)
+    
+    par(mar=c(3.5, 3.5, 2.1, 0.1),mgp=c(3,1,0)); dev.off()
